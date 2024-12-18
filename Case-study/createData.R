@@ -149,7 +149,6 @@ if (predANC) {
   #Temp Mean 13.15843 SD 12.83619
   
   #image.plot(x = lon, y  = lat, z = xtabs(elevation ~ longitude + latitude, Temp))
-  library(sf)
   qq <- st_as_sf(as.data.frame(Temp), coords = c('longitude', 'latitude'), crs = '+proj=lonlat')
   qq$Temp <- qq$temperature
   qq$bio1 <- qq$temperature
@@ -169,9 +168,6 @@ if (predANC) {
   qq$speciesNumIndex <- 90 #91
   
   #saveRDS(qq, 'ancData.rds')
-  
-  library(inlabru)
-  library(ggplot2)
   
   mapP <- mapast::getmap(65, model = 'PALEOMAP')# model = 'PALEOMAP'
   mapP <- st_as_sf(mapP)
