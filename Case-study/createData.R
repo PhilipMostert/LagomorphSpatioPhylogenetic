@@ -18,9 +18,9 @@ mam <- read.nexus("data-raw/Bunnies/Phylo.txt")
 grep("Lago", mam[[1]]$node.label)
 hares <- extract.clade(mam[[1]], mam[[1]]$node.label[c(673)])
 
-Lepus <- sf::st_read('~/Downloads/redlist_species_data_8c436bf9-8db4-4cc8-8657-3662399ac09b/data_0.shp')
-Ochotona <- sf::st_read('~/Downloads/redlist_species_data_cdd72903-fff8-4ec9-952e-23935fd863ba/')
-Buck <- sf::read_sf('~/Downloads/redlist_species_data_71ad295e-319f-44dc-ac01-012e17531499/data_0.shp')
+Lepus <- sf::st_read('data-raw/redlist_species_data_8c436bf9-8db4-4cc8-8657-3662399ac09b/data_0.shp')
+Ochotona <- sf::st_read('data-raw/redlist_species_data_cdd72903-fff8-4ec9-952e-23935fd863ba/')
+Buck <- sf::read_sf('data-raw/redlist_species_data_71ad295e-319f-44dc-ac01-012e17531499/data_0.shp')
 Lago <- rbind(Lepus, Ochotona, Buck)
 
 
@@ -130,18 +130,11 @@ if (predData) {
 predANC <- FALSE
 if (predANC) {
   
-  library(ncdf4)
-  Coords <- nc_open(filename ='~/Downloads/6b2. Mean Annual Precipitation (nc)/065Ma_precip.nc')
-  Temp <- as.matrix(read.csv('~/Downloads/6a1. Mean Annual Temperatures (csv, list)/065_temp_list.csv'))
-  Prec <- as.matrix(read.csv('~/Downloads/6b1. Mean Annual Precipitation (csv)/065_precip.csv'))
-  lon <- ncvar_get(Coords,"lon")
-  lat <- ncvar_get(Coords,"lat")
-  
   #image.plot(x = lon, y  = lat, z = xtabs(elevation ~ longitude + latitude, Temp))
   #image.plot(x = lon, y  = lat, z = xtabs(Value ~  X.Longitude + Latitude, Prec))
   
   
-  Coords <- nc_open(filename ='~/Downloads/5a. PaleoDEM (nc, 3601x1801)/000_v21144.nc')
+  Coords <- nc_open(filename ='data-raw/5a. PaleoDEM (nc, 3601x1801)/000_v21144.nc')
   lon <- ncvar_get(Coords,"longitude")
   lat <- ncvar_get(Coords,"latitude")
   
