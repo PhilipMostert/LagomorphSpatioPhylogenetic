@@ -291,5 +291,5 @@ save(interceptPhyloSpace, interceptPhylo, envPhyloSpace, envPhylo,
      interceptAncestorsPhyloSpace, interceptAncestorsPhylo, 
      envAncestorsPhyloSpace, envAncestorsPhylo, precIntPhyloSpace, 
      precEnvPhyloSpace, precIntPhylo, precEnvPhylo, rangeSpatPhylo, 
-     sigmaSpatPhylo, dicPhyloSpace, dicPhylo, waicPhyloSpace, waicPhylo, file = 'Simulations/spatialResults/spatSim.Rdata')
+     sigmaSpatPhylo, dicPhyloSpace, dicPhylo, waicPhyloSpace, waicPhylo, file = paste0('Simulations/spatialResults/Sigma', sigPar,'/spatSim.Rdata'))
 
