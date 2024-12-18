@@ -1,0 +1,432 @@
+---
+title: "Spatio-phylogenetics model using the hare data"
+author: "Philip S. Mostert"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=8, fig.height=5)
+```
+
+# Introduction
+
+This example is based around estimating the distribution trends of 45 species of hare across Africa and Eurasia, and estimate their evolutionary patterns across their phylogeny. The dataset containing information on the species occurrence was obtained from IUCN range map data, which provides polygons illustrating the potential range of the tips of the phylogeny. We rasterized this data into squares, and transformed it into binary presence/absence based on whether the square overlapped with the polygon or not. In addition, we included an additional species in our phylogeny (*Tragelaphus imberbis),* not closely related to the *Lagomorphs*, in order to estimate the distribution patterns of the root of our phylogeny.
+
+We will be using the integrated nested Laplace approximation (INLA) methodology to estimate the model using the *inlabru R* package. This offers a computationally efficient way to estimate the model in a Bayesian framework.
+
+## Load in the data
+
+Firstly, load in the data and all the required packages to complete the analysis.
+
+```{r Required packages and load, message = FALSE, warning = FALSE}
+
+library(phytools)
+library(rworldmap)
+library(ggridges)
+library(ggtree)
+library(INLA)
+library(sf)
+library(reshape2)
+library(dplyr)
+library(inlabru)
+library(ggplot2)
+library(ape)
+
+load('data/speciesDataAA.rdata') #Change this
+##Change this?
+proj <- '+proj=moll +lon_0=40 +x_0=0 +y_0=0 +ellps=sphere +units=km +no_defs'
+
+```
+
+The phylogeny in this example looks like this:
+
+```{r Look at hares, fig.width=8, fig.height=5}
+
+ggtree(hares, layout = 'dendrogram') + geom_tiplab()
+
+```
+
+This phylogeny is not too complicated, containing only 45 tips representing the extant species and 45 internal nodes representing their ancestors. Next we make a plot of the species occurrence data. Note that we remove some of the countries and islands which are disconnected from the mainland of the study area, which may cause estimation issues.
+
+```{r world, include=TRUE, eval=TRUE}
+
+world <- getMap(resolution = 'less islands') # rnaturalearth::ne_countries(returnclass = 'sf')
+studyArea <- world[world$continent %in% c('Africa', 'Eurasia'),] #c('Africa, 'Eurasia)
+studyArea <- as(studyArea, 'sf')
+
+studyArea <- studyArea[!studyArea$NAME %in% c('Greenland', 
+                                              'Madagascar', 
+                                              'Iceland',
+                                              'East Timor', 
+                                              'Malaysia', 
+                                              'Brunei',
+                                              'Indonesia', 
+                                              'Philippines', 
+                                              'Japan', 
+                                              'Cyprus'),]
+
+studyArea <- st_transform(studyArea, proj)
+studyArea <- rmapshaper::ms_filter_islands(studyArea, 90000)
+
+ggplot() +
+  gg(studyArea) +
+  gg(speciesDataSF[speciesDataSF$speciesNumIndex %in% 1:45,], 
+     aes(col = as.character(Y))) +
+  scale_colour_manual(values = c('dark red', 'dark blue')) +
+  labs(colour = 'Status') +
+  facet_wrap(~ species) +
+  theme_bw()
+
+```
+
+As we can see, the species native ranges are almost everywhere across Eurasia and Africa, although the ranges for most species are relatively small.
+
+We plot the mesh used in the analysis, which is required to estimate the spatial effect.
+
+```{r mesh plot}
+
+meshPlot <- fm_transform(mesh, proj)
+
+ggplot() + 
+  gg(meshPlot)
+
+```
+
+## Variance covariance matrix
+
+We then calculate the variance-covariance matrix across the phylogeny using the *MCMCglmm* package, and then scale the matrix. *R-INLA* requires us to use the precision matrix, therefore we use the inverse of the variance-covariance matrix later on. We set `scale = FALSE` as we consider the un-scaled variance-covariance matrix.
+
+```{r vcv}
+
+prec_mat <- MCMCglmm::inverseA(pedigree = hares,
+                               scale = FALSE)$Ainv
+
+prec_mat <- prec_mat[na.omit(match(unique(speciesDataSF$species), 
+                                   row.names(prec_mat))),
+                     na.omit(match(unique(speciesDataSF$species), 
+                                   row.names(prec_mat)))]
+
+```
+
+## Model components
+
+The formula for our model includes:
+
+-   A shared intercept term for all the species. We assumed a Gaussian prior with 0 mean and variance 1 for this term.
+
+-   A fixed effect for *bio1* (mean annual temperature) and *bio12* (annual precipitation), as well as their quadratic effect. We assumed a Gaussian prior with 0 mean and variance 1 for these terms.
+
+-   Phylogenetic effect for each species using a *generic0* model to account for relatedness on the phylogeny. We set `constr = TRUE`, which applies a sum-to-zero constraint for the effect. So the effect here is the variation around the shared intercept for each species.
+
+-   Phylogenetic effect for *bio1* for each species, as well as its quadratic effect.
+
+-   Phylogenetic effect for *bio12* for each species, as well as its quadratic effect.
+
+-   In addition, we add an *iid* effect for each phylogenetic effect in order to obtain an estimate of phylogenetic signal.
+
+-   A spatial effect for each species (with shared hyperparameters across the species), specified as a Gaussian random field. To estimate it, we use the *INLA-SPDE* approach, which requires us to build a Delaunay triangulated mesh around our study area.
+
+    Mathematically, if we assume that presence of species $i$ in sampling location $s=(coord_x, coord_y)^\prime$ is $Y_{i}(s)$, then the probability of presence $\phi_{si}$ at that site is:$$logit\left(\phi_{i}(s)\right) =\alpha_{i}+\sum^K_{p=1}\beta_{ip}X_{p}(s) +\zeta_i (s),\\ \alpha_{i} \sim MVN\left(\boldsymbol{0}, \sigma^2V\right),\\\beta_{ip}\sim MVN\left(\boldsymbol{0}, \sigma^2V\right),$$
+
+where: $X_{p}(s)$ is the $p^{th}$ environmental covariate, $\alpha_{i}$ are the species specific intercept terms, $\beta_{ip}$ are the species specific model coefficients (including quadratic effects). The matrix $V$ denotes the phylogenetic variance-covariance matrix created based on the relatedness of the species on the phylogeny. The term $\zeta_i(s)$ represents a zero-mean Gaussian random field with a Máten correrlation function used to account for potential spatial autocorrelation and unmeasured covariates.
+
+Using *inlabru*, the components are given as follows:
+
+```{r Formula}
+
+comps <- Y ~ 0 +   
+  Intercept(1, prec.linear = 1, mean.linear = 0) +
+  bio1(main = bio1, prec.linear = 1, mean.linear = 0) +
+  bio12(main = bio12, prec.linear = 1, mean.linear = 0) +
+  bio1s(main = bio1s, prec.linear = 1, mean.linear = 0) +
+  bio12s(main = bio12s, prec.linear = 1, mean.linear = 0) +
+  spEffect(main = speciesNum, 
+           model = "generic0",  
+           Cmatrix = prec_mat, 
+           constr = TRUE,
+           hyper = list(prec = priorInt)) +
+  spEffecti(main = speciesNum, 
+           model = "iid",
+           constr = TRUE,
+           hyper = list(prec = priorIntI)) +
+  RBio1(main = Bio1index, bio1, 
+        model = "generic0",  
+        Cmatrix = prec_mat, 
+        constr = TRUE,
+        hyper = list(prec = prior)) +
+  RBio1i(main = Bio1index, bio1, 
+        model = "iid",
+        constr = TRUE,
+       hyper = list(prec = prior)) +
+  RBio1s(main = Bio1index2, bio1s, 
+         model = "generic0",  
+         Cmatrix = prec_mat, 
+         constr = TRUE,
+         hyper = list(prec = prior)) +
+  RBio1si(main = Bio1index2, bio1s, 
+         model = "iid",
+         constr = TRUE,
+         hyper = list(prec = prior)) +
+  RBio12(main = Bio12index, bio12, 
+         model = "generic0",  
+         Cmatrix = prec_mat, 
+         constr = TRUE,
+         hyper = list(prec = prior)) +
+  RBio12i(main = Bio12index, bio12, 
+         model = "iid",
+         constr = TRUE,
+         hyper = list(prec = prior)) +
+  RBio12s(main = Bio12index2, bio12s, 
+          model = "generic0",  
+          Cmatrix = prec_mat, 
+          constr = TRUE,
+          hyper = list(prec = prior)) +
+  RBio12si(main = Bio12index2, bio12s, 
+          model = "iid",
+          constr = TRUE,
+          hyper = list(prec = prior)) +
+  spatEffect(main = geometry, model = spatialEffect,
+             group =  speciesNumIndex,
+             control.group = list(model = 'iid', 
+                                  hyper = priorIID))
+
+```
+
+We define penalizing complexity priors for the hyperparameters of the random effects in the model. These priors are designed to penalize the estimates of the hyperparameters to encourage simpler models.
+
+```{r Define priors}
+
+prior <- list(prior="pc.prec", 
+              param = c(1, 0.1))
+
+priorInt <-  list(prior="pc.prec", 
+                  param = c(0.1, 0.01))
+
+priorIID <- list(prec = list(initial = -2))
+
+spatialEffect <- inla.spde2.pcmatern(mesh = mesh,
+                                     constr = TRUE, 
+                                     prior.sigma = c(1, 0.1),
+                                     prior.range = c(750, 0.1)) #750?
+
+```
+
+We then scale our climate variable and create our indices required for the model.
+
+```{r Final data wrangling}
+
+speciesDataSF$bio1 <- c(scale(speciesDataSF$temp))
+speciesDataSF$bio12 <- c(scale(speciesDataSF$prec))
+
+speciesDataSF$bio1s <- speciesDataSF$bio1^2
+speciesDataSF$bio12s <- speciesDataSF$bio12^2
+
+speciesDataSF$Intercept <- 1 
+
+speciesDataSF$Bio1index <- speciesDataSF$Bio1index2 <- speciesDataSF$speciesNum
+speciesDataSF$Bio12index <- speciesDataSF$Bio12index2 <- speciesDataSF$speciesNum
+speciesDataSF$speciesNum2 <- speciesDataSF$speciesNumSpat <- speciesDataSF$speciesNum
+
+
+```
+
+We then define the likelihood of the model required by *inlabru*.
+
+```{r Likelihoods}
+
+haresLike <- like(formula = Y ~ .,
+                  data = speciesDataSF,
+                  include = c(
+                    'RBio1',
+                    'RBio1s',
+                    'RBio12',
+                    'RBio12s',
+                    'RBio1i',
+                    'RBio1si',
+                    'RBio12i',
+                    'RBio12si',
+                    'spEffect',
+                    'Intercept',
+                    'bio1', 'bio12',
+                    'bio1s', 'bio12s',
+                    'spatEffect', 'spEffecti'
+                  ),
+                  family = 'binomial')
+
+```
+
+And then we estimate our model. In this case we specify: *control.predictor = list(compute = TRUE)* in order to predict the values that are missing in our response (the presence/absence of the species along the phylogeny). Note that this model may take a long time to estimate given the large number of hyperparameters in the model. We choose `int.strategy ='eb'` to speed the estimation up a bit.
+
+```{r Run Model, error=FALSE, message=FALSE}
+
+inla.setOption(inla.mode = "experimental")
+
+model <- bru(comps, haresLike, options = list(safe = TRUE, verbose = TRUE,
+                    num.threads = 1,
+                    control.inla = list(
+                    stupid.search = FALSE,
+                    int.strategy = 'eb',
+                    strategy="gaussian",
+                    hessian.correct.skewness.only = FALSE,
+                    control.vb= list(enable = TRUE),
+                    cmin = 0),
+                    control.predictor = list(compute = TRUE, link = 1),
+                    control.fixed = list(correlation.matrix=FALSE),
+                    control.compute = list(config = TRUE,
+                    return.marginals.predictor=TRUE)))
+
+```
+
+We may see a summary of the model, this gives us a quick overview of the fixed and random effects used in the model.
+
+```{r Summary of model}
+
+INLA:::summary.inla(model)
+
+```
+
+Looking at the first five phylogeny effects for the intercept term of the model:
+
+```{r Random effects}
+
+model$summary.random$spEffect$ID <- unique(as.character(speciesDataSF$species))
+model$summary.random$RBio1$ID <- unique(as.character(speciesDataSF$species))
+model$summary.random$RBio1s$ID <- unique(as.character(speciesDataSF$species))
+model$summary.random$RBio12$ID <- unique(as.character(speciesDataSF$species))
+model$summary.random$RBio12s$ID <- unique(as.character(speciesDataSF$species))
+
+model$summary.random$spEffect[1:5,]
+
+```
+
+We then plot marginal curves for the two bio-climatic variables of the model for each tip of the phylogeny.
+
+```{r Marginal curves}
+
+TempMarg <- data.frame(do.call(rbind, model$marginals.random$RBio1[c(1:46)]))
+TempMarg$id <- c(rep(hares$tip.label, each = 43))
+TempMarg <- TempMarg[,c(3,1,2)]
+names(TempMarg) <- c('tree.tip.label', 'xx' ,'yy')
+TempMarg$gg <- TempMarg$tree.tip.label
+
+RainfallMarg <- data.frame(do.call(rbind, model$marginals.random$RBio12[c(1:46)]))
+RainfallMarg$id <- c(rep(hares$tip.label, each = 43))
+RainfallMarg <- RainfallMarg[,c(3,1,2)]
+names(RainfallMarg) <- c('tree.tip.label', 'xx' ,'yy')
+RainfallMarg$gg <- RainfallMarg$tree.tip.label
+
+ggtree(hares, ladderize = FALSE) +
+  geom_tiplab(offset=0.1, hjust=0, size=2.5) +
+  ggtree::geom_facet(panel = 'Temperature', 
+                     data = TempMarg,
+                     geom = geom_ridgeline, mapping = aes(x = xx, 
+                                            height = yy, group = gg)) +
+  theme_tree2(legend.position=c(-10, 10))
+
+
+ggtree(hares, ladderize = FALSE) +
+  geom_tiplab() +
+  ggtree::geom_facet(panel = 'Rainfall', 
+                     data = RainfallMarg,
+                     geom = geom_ridgeline, mapping = aes(x = xx, 
+                                            height = yy, group = gg)) +
+    theme_tree2(legend.position=c(-10, 10))
+
+```
+
+We may then create maps of probability of occurrence using the `predict` function, which will create 100 samples from the posterior distribution.
+
+```{r Maps}
+
+spatPreds <- predict(model, 
+    newdata = speciesDataSF[speciesDataSF$speciesNumIndex %in% 1:45,], 
+                     formula = ~ INLA::inla.link.logit(Intercept + 
+                                                       spatEffect +
+                                                       spEffect +
+                                                       RBio1 +
+                                                       RBio1s +
+                                                       RBio12 +
+                                                       RBio12s +
+                                                       bio1 +
+                                                       bio12 +
+                                                       bio1s + 
+                                                       bio12s + 
+                                                       RBio1i +
+                                                       RBio1si +
+                                                       RBio12i +
+                                                       RBio12si,
+                       inverse = TRUE), seed = 1, 
+    probs = c( probs = c(0.1, 0.5, 0.9)))
+
+```
+
+And then create maps of the predicted species richness, along with the sum of the uncertainties:
+
+```{r plot of rich}
+
+Rich <- spatPreds[spatPreds$speciesNum %in% 1:45,]
+
+Rich2 <- Rich %>% group_by(geometry) %>%
+  mutate(mid = sum(median), sd = sum(sd)) %>% slice(1)
+
+RichMid <- Rich2 %>% select(mid)
+RichSD <- Rich2 %>% select(sd)
+
+ggplot() +
+  gg(RichMid, aes(col = mid)) +
+  gg(st_boundary(studyArea)) +
+  coord_sf(crs =  proj) +
+  scale_colour_gradientn(colours = colorspace::heat_hcl(10))
+
+ggplot() +
+  gg(RichSD, aes(col = sd)) +
+  gg(st_boundary(studyArea)) +
+  coord_sf(crs =  proj) +
+  scale_colour_gradientn(colours = colorspace::heat_hcl(10))
+
+```
+
+Finally, we plot the distribution for the phylogenetic signal for each of the phylogenetic effects included in the model.
+
+```{r signal}
+
+posterior_sample = inla.hyperpar.sample(50000, model)
+
+lambda.int = data.frame(density =
+          (1 / posterior_sample[,1]) / (rowSums(1/posterior_sample[,1:2])), 
+          variable = 'Intercept')
+
+lambda.temp = data.frame(density = 
+         (1 / posterior_sample[,3]) / (rowSums(1/posterior_sample[,3:4])), 
+         variable = 'Temperature')
+
+lambda.temps = data.frame(density = 
+         (1 / posterior_sample[,5]) / (rowSums(1/posterior_sample[,5:6])), 
+         variable = 'Temperature2')
+
+lambda.rain = data.frame(density = 
+        (1 / posterior_sample[,7]) / (rowSums(1/posterior_sample[,7:8])), 
+        variable = 'Rain')
+
+lambda.rains = data.frame(density = 
+        (1 / posterior_sample[,9]) / (rowSums(1/posterior_sample[,9:10])), 
+        variable = 'Rain2')
+
+Lambda <- rbind(lambda.int, 
+                lambda.temp,
+                lambda.temps, 
+                lambda.rain,
+                lambda.rains)
+
+ggplot(Lambda) +
+  geom_density(aes(density), adjust = 5) +
+  facet_wrap(~variable, scales = 'free')
+
+```
+
+```{r session}
+
+sessionInfo()
+
+```
